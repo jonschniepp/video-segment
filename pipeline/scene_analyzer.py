@@ -74,7 +74,7 @@ class SceneAnalyzer:
             add_generation_prompt=True,
         )
 
-        response = generate(
+        result = generate(
             self.model,
             self.processor,
             prompt=prompt,
@@ -83,6 +83,31 @@ class SceneAnalyzer:
             temperature=0.1,
         )
 
-        labels = [label.strip().lower() for label in response.strip().split(",")]
+        labels = [label.strip().lower() for label in result.text.strip().split(",")]
         labels = [l for l in labels if l and len(l) < 50]
         return labels
+
+    def _generate_raw(self, image: Image.Image, user_msg: str) -> str:
+        """Generate a raw text response from Gemma given an image and prompt.
+
+        Used by StateAnalyzer for custom prompts on entity crops.
+        """
+        self.load()
+
+        prompt = self.processor.apply_chat_template(
+            [
+                {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": user_msg}]},
+            ],
+            add_generation_prompt=True,
+        )
+
+        result = generate(
+            self.model,
+            self.processor,
+            prompt=prompt,
+            image=image,
+            max_tokens=150,
+            temperature=0.2,
+        )
+
+        return result.text.strip()

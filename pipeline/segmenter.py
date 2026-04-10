@@ -3,9 +3,10 @@
 import gc
 from dataclasses import dataclass
 
+import cv2
 import mlx.core as mx
 import numpy as np
-from mlx_vlm.models.sam3.generate import Sam3Predictor
+from mlx_vlm.models.sam3.generate import Sam3Predictor, predict_multi
 from mlx_vlm.models.sam3.processing_sam3 import Sam3Processor
 from mlx_vlm.utils import get_model_path, load_model
 from PIL import Image
@@ -21,10 +22,14 @@ class Detection:
     labels: list[str]      # (N,) label per detection
 
 
+DEFAULT_INFERENCE_WIDTH = 640
+
+
 class Segmenter:
-    def __init__(self, model_id: str = MODEL_ID, threshold: float = 0.3):
+    def __init__(self, model_id: str = MODEL_ID, threshold: float = 0.3, inference_width: int = DEFAULT_INFERENCE_WIDTH):
         self.model_id = model_id
         self.threshold = threshold
+        self.inference_width = inference_width
         self.predictor = None
 
     def load(self):
@@ -44,61 +49,90 @@ class Segmenter:
             mx.metal.clear_cache()
             print("SAM3 unloaded.")
 
+    def _downscale(self, image: Image.Image) -> tuple[Image.Image, float]:
+        """Downscale image to inference_width, return (scaled_image, scale_factor).
+
+        If image is already smaller than inference_width, return it unchanged.
+        """
+        orig_w, orig_h = image.size
+        if orig_w <= self.inference_width:
+            return image, 1.0
+
+        scale = self.inference_width / orig_w
+        new_w = self.inference_width
+        new_h = int(orig_h * scale)
+        return image.resize((new_w, new_h), Image.LANCZOS), scale
+
+    def _upscale_results(
+        self, boxes: np.ndarray, masks: np.ndarray, scale: float, orig_w: int, orig_h: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Scale boxes and masks back to original resolution."""
+        if scale == 1.0:
+            return boxes, masks
+
+        # Scale bounding boxes back up
+        boxes = boxes / scale
+
+        # Resize each mask to original dimensions
+        upscaled = np.zeros((masks.shape[0], orig_h, orig_w), dtype=masks.dtype)
+        for i in range(masks.shape[0]):
+            upscaled[i] = cv2.resize(masks[i].astype(np.float32), (orig_w, orig_h)) > 0.5
+        return boxes, upscaled
+
     def detect(self, image: Image.Image, labels: list[str]) -> Detection:
-        """Run detection + segmentation for each label.
+        """Run detection + segmentation for all labels in a single batched call.
+
+        Uses predict_multi() to run the vision backbone once and reuse it
+        across all label prompts. Downscales the image for faster inference,
+        then scales results back to the original resolution.
 
         Args:
             image: PIL Image to analyze.
             labels: List of text prompts (e.g., ["person", "car"]).
 
         Returns:
-            Detection with combined results across all labels.
+            Detection with results at original image resolution.
         """
         self.load()
 
-        all_boxes = []
-        all_masks = []
-        all_scores = []
-        all_labels = []
+        orig_w, orig_h = image.size
+        small_image, scale = self._downscale(image)
+        if scale != 1.0:
+            sw, sh = small_image.size
+            print(f" [{orig_w}x{orig_h} → {sw}x{sh}]", end="", flush=True)
 
-        for label in labels:
-            result = self.predictor.predict(image, text_prompt=label)
+        # Single batched call: ViT runs once, text+DETR per label
+        result = predict_multi(self.predictor, small_image, labels)
 
-            n = len(result.scores)
-            if n == 0:
-                continue
-
-            boxes = np.array(result.boxes[:n])
-            scores = np.array(result.scores[:n])
-
-            # Convert masks: may be mx.array, convert to numpy
-            masks = result.masks[:n]
-            if isinstance(masks, mx.array):
-                masks = np.array(masks)
-            elif not isinstance(masks, np.ndarray):
-                masks = np.array(masks)
-
-            # Ensure masks are 3D: (N, H, W)
-            if masks.ndim == 2:
-                masks = masks[np.newaxis, ...]
-
-            all_boxes.append(boxes)
-            all_masks.append(masks)
-            all_scores.append(scores)
-            all_labels.extend([label] * n)
-
-        if not all_boxes:
-            h, w = image.size[1], image.size[0]
+        n = len(result.scores)
+        if n == 0:
             return Detection(
                 boxes=np.empty((0, 4)),
-                masks=np.empty((0, h, w)),
+                masks=np.empty((0, orig_h, orig_w)),
                 scores=np.empty((0,)),
                 labels=[],
             )
 
+        boxes = np.array(result.boxes[:n])
+        scores = np.array(result.scores[:n])
+
+        # Convert masks: may be mx.array, convert to numpy
+        masks = result.masks[:n]
+        if isinstance(masks, mx.array):
+            masks = np.array(masks)
+        elif not isinstance(masks, np.ndarray):
+            masks = np.array(masks)
+
+        # Ensure masks are 3D: (N, H, W)
+        if masks.ndim == 2:
+            masks = masks[np.newaxis, ...]
+
+        # Scale back to original resolution
+        boxes, masks = self._upscale_results(boxes, masks, scale, orig_w, orig_h)
+
         return Detection(
-            boxes=np.concatenate(all_boxes, axis=0),
-            masks=np.concatenate(all_masks, axis=0),
-            scores=np.concatenate(all_scores, axis=0),
-            labels=all_labels,
+            boxes=boxes,
+            masks=masks,
+            scores=scores,
+            labels=list(result.labels),
         )
