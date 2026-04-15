@@ -27,18 +27,30 @@ def _bbox_bottom_center(bbox: np.ndarray) -> tuple[int, int]:
 
 
 class PathTracker:
-    """Accumulates bottom-center positions per entity ID for drawing motion trails."""
+    """Accumulates bottom-center positions per entity ID for drawing motion trails.
 
-    def __init__(self, max_length: int = 300):
+    When a FrameStabilizer is provided, positions are stored in reference-frame
+    coordinates and warped back to current-frame space at draw time. This
+    compensates for camera drift so trails reflect real entity movement.
+    """
+
+    def __init__(self, max_length: int = 300, stabilizer=None):
         self.max_length = max_length
         self.paths: dict[str, list[tuple[int, int]]] = defaultdict(list)
         self._id_colors: dict[str, tuple[int, int, int]] = {}
         self._color_idx = 0
+        self.stabilizer = stabilizer
 
-    def update(self, entity_ids: list[str], boxes: np.ndarray):
-        """Record new positions for tracked entities."""
+    def update(self, entity_ids: list[str], boxes: np.ndarray, frame_idx: int = 0):
+        """Record new positions for tracked entities.
+
+        If a stabilizer is set, coordinates are warped to reference-frame space
+        before storing so that camera drift is cancelled out.
+        """
         for i, eid in enumerate(entity_ids):
             pt = _bbox_bottom_center(boxes[i])
+            if self.stabilizer is not None:
+                pt = self.stabilizer.warp_points_to_ref([pt], frame_idx)[0]
             path = self.paths[eid]
             path.append(pt)
             if len(path) > self.max_length:
@@ -57,6 +69,7 @@ def draw_detections(
     detection: Detection,
     entity_ids: list[str] | None = None,
     path_tracker: PathTracker | None = None,
+    frame_idx: int = 0,
 ) -> np.ndarray:
     """Draw masks, boxes, labels, and entity motion paths on a frame.
 
@@ -66,6 +79,7 @@ def draw_detections(
         entity_ids: Optional list of entity ID strings (one per detection).
             If provided, each entity gets a persistent color and ID label.
         path_tracker: Optional PathTracker for drawing motion trails.
+        frame_idx: Current frame index (used for stabilized path warping).
 
     Returns:
         Annotated frame as numpy array (H, W, 3).
@@ -87,11 +101,14 @@ def draw_detections(
             if len(path) < 2:
                 continue
             color = path_tracker.get_color(eid)
-            # Draw connecting line
-            pts = np.array(path, dtype=np.int32)
+            # Warp ref-space points back to current frame if stabilized
+            if path_tracker.stabilizer is not None:
+                draw_path = path_tracker.stabilizer.warp_points_from_ref(path, frame_idx)
+            else:
+                draw_path = path
+            pts = np.array(draw_path, dtype=np.int32)
             cv2.polylines(overlay, [pts], isClosed=False, color=color, thickness=PATH_THICKNESS)
-            # Draw dot at most recent position
-            cv2.circle(overlay, path[-1], PATH_DOT_RADIUS, color, -1)
+            cv2.circle(overlay, draw_path[-1], PATH_DOT_RADIUS, color, -1)
 
     for i in range(len(detection.scores)):
         if entity_ids and id_color:

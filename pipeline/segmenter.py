@@ -79,6 +79,21 @@ class Segmenter:
             upscaled[i] = cv2.resize(masks[i].astype(np.float32), (orig_w, orig_h)) > 0.5
         return boxes, upscaled
 
+    @staticmethod
+    def _boxes_from_masks(masks: np.ndarray, fallback_boxes: np.ndarray) -> np.ndarray:
+        """Derive tight bounding boxes from binary masks.
+
+        Falls back to the model's predicted box if a mask is empty.
+        """
+        boxes = np.empty_like(fallback_boxes)
+        for i in range(len(masks)):
+            ys, xs = np.where(masks[i] > 0)
+            if len(xs) == 0:
+                boxes[i] = fallback_boxes[i]
+            else:
+                boxes[i] = [xs.min(), ys.min(), xs.max(), ys.max()]
+        return boxes
+
     def detect(self, image: Image.Image, labels: list[str]) -> Detection:
         """Run detection + segmentation for all labels in a single batched call.
 
@@ -129,6 +144,10 @@ class Segmenter:
 
         # Scale back to original resolution
         boxes, masks = self._upscale_results(boxes, masks, scale, orig_w, orig_h)
+
+        # Recompute boxes from masks — SAM3's box regression can misalign
+        # when the image is squished to square for inference
+        boxes = self._boxes_from_masks(masks, boxes)
 
         return Detection(
             boxes=boxes,

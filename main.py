@@ -28,6 +28,7 @@ def main():
     parser.add_argument("--state-every-n", type=int, default=30, help="Analyze entity states with Gemma every N frames (default: 30). Only used with --entities.")
     parser.add_argument("--max-entities", type=int, default=10, help="Max entities to analyze per state frame (default: 10). Only used with --entities.")
     parser.add_argument("--georef", type=str, default=None, help="Path to georef JSON with pixel→GPS reference points. Only used with --entities.")
+    parser.add_argument("--stabilize", action="store_true", help="Compensate camera drift in motion trails (recommended for drone footage)")
 
     args = parser.parse_args()
 
@@ -50,6 +51,7 @@ def main():
             max_entities_per_frame=args.max_entities,
             georef_path=args.georef,
             display=not args.no_display,
+            stabilize=args.stabilize,
         )
         print(f"Done. Entity model: {json_path}")
         print(f"Done. Tracked video: {video_path}")
@@ -67,6 +69,7 @@ def main():
             inference_width=inf_width,
             scene_threshold=args.scene_threshold,
             max_reuse=args.max_reuse,
+            stabilize=args.stabilize,
         )
         print(f"Done. Output: {output}")
 

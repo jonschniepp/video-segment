@@ -14,6 +14,7 @@ from .georef import bbox_to_gps, compute_homography, load_reference
 from .scene_analyzer import SceneAnalyzer
 from .segmenter import Detection, Segmenter
 from .state_analyzer import StateAnalyzer
+from .stabilizer import FrameStabilizer
 from .visualizer import PathTracker, draw_detections
 
 # Sentinel value to signal end-of-stream between threads
@@ -92,6 +93,7 @@ def _inference_thread(
     total: int,
     scene_threshold: float = 0.92,
     max_reuse: int = 60,
+    stabilizer: FrameStabilizer | None = None,
 ):
     """Pull frames, run SAM3 on keyframes, push (frame_idx, frame, detection, entity_ids) to write queue.
 
@@ -132,6 +134,10 @@ def _inference_thread(
         frame_idx, frame = item
         frames_since_detect += 1
 
+        # Compute stabilization transform for every frame (cheap ~5ms)
+        if stabilizer is not None:
+            stabilizer.update(frame, frame_idx)
+
         # Decide whether this frame needs inference
         run_detect = False
 
@@ -147,6 +153,8 @@ def _inference_thread(
             if last_hist is None or _scene_changed(last_hist, curr_hist, scene_threshold):
                 run_detect = True
                 last_hist = curr_hist
+                if stabilizer is not None:
+                    stabilizer.reset()
             # If scene hasn't changed, skip even though it's an every_n frame
 
         if run_detect:
@@ -183,6 +191,7 @@ def process_video(
     inference_width: int = 640,
     scene_threshold: float = 0.92,
     max_reuse: int = 60,
+    stabilize: bool = False,
 ) -> str:
     """Process a video file with async reader → inference pipeline.
 
@@ -268,6 +277,8 @@ def process_video(
         daemon=True,
     )
 
+    stabilizer = FrameStabilizer() if stabilize else None
+
     inferencer = threading.Thread(
         target=_inference_thread,
         args=(
@@ -277,11 +288,12 @@ def process_video(
             WRITE_QUEUE_SIZE,
             segmenter, labels, every_n, total,
             scene_threshold, max_reuse,
+            stabilizer,
         ),
         daemon=True,
     )
 
-    path_tracker = PathTracker()
+    path_tracker = PathTracker(stabilizer=stabilizer)
 
     try:
         reader.start()
@@ -306,9 +318,8 @@ def process_video(
             frame_idx, frame, detection, entity_ids = item
 
             if detection is not None and entity_ids is not None:
-                # Update path history with new positions
-                path_tracker.update(entity_ids, detection.boxes)
-                annotated = draw_detections(frame, detection, entity_ids, path_tracker)
+                path_tracker.update(entity_ids, detection.boxes, frame_idx)
+                annotated = draw_detections(frame, detection, entity_ids, path_tracker, frame_idx)
             elif detection is not None:
                 annotated = draw_detections(frame, detection)
             else:
@@ -440,6 +451,7 @@ def process_video_entities(
     max_entities_per_frame: int = 10,
     georef_path: str | None = None,
     display: bool = True,
+    stabilize: bool = False,
 ) -> tuple[str, str]:
     """Process a video: build a JSON entity model AND produce an annotated tracked video.
 
@@ -481,9 +493,11 @@ def process_video_entities(
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     vid_writer = cv2.VideoWriter(output_video, fourcc, fps, (w, h))
 
+    stabilizer = FrameStabilizer() if stabilize else None
+
     scene = SceneModel(video_source=video_path, fps=fps, total_frames=total)
     id_tracker = IDTracker()
-    path_tracker = PathTracker()
+    path_tracker = PathTracker(stabilizer=stabilizer)
 
     # --- Determine labels ---
     if query:
@@ -524,6 +538,10 @@ def process_video_entities(
             ret, frame = cap.read()
             if not ret:
                 break
+
+            # Compute stabilization transform for every frame
+            if stabilizer is not None:
+                stabilizer.update(frame, frame_idx)
 
             if frame_idx % every_n == 0:
                 pil_frame = _frame_to_pil(frame)
@@ -568,8 +586,8 @@ def process_video_entities(
 
             # Write annotated frame with paths
             if last_detection is not None and last_entity_ids is not None:
-                path_tracker.update(last_entity_ids, last_detection.boxes)
-                annotated = draw_detections(frame, last_detection, last_entity_ids, path_tracker)
+                path_tracker.update(last_entity_ids, last_detection.boxes, frame_idx)
+                annotated = draw_detections(frame, last_detection, last_entity_ids, path_tracker, frame_idx)
             else:
                 annotated = frame
 

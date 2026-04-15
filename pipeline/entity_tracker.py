@@ -20,6 +20,15 @@ def _iou(box_a: np.ndarray, box_b: np.ndarray) -> float:
     return inter / union if union > 0 else 0.0
 
 
+def _center_distance(box_a: np.ndarray, box_b: np.ndarray) -> float:
+    """Compute Euclidean distance between the centers of two boxes."""
+    cx_a = (box_a[0] + box_a[2]) / 2
+    cy_a = (box_a[1] + box_a[3]) / 2
+    cx_b = (box_b[0] + box_b[2]) / 2
+    cy_b = (box_b[1] + box_b[3]) / 2
+    return float(np.sqrt((cx_a - cx_b) ** 2 + (cy_a - cy_b) ** 2))
+
+
 class IDTracker:
     """Assigns persistent IDs to detections by matching across frames with IoU.
 
@@ -28,9 +37,10 @@ class IDTracker:
     frames are retired.
     """
 
-    def __init__(self, iou_threshold: float = 0.3, max_lost: int = 30):
+    def __init__(self, iou_threshold: float = 0.1, max_lost: int = 30, max_distance: float = 150.0):
         self.iou_threshold = iou_threshold
         self.max_lost = max_lost
+        self.max_distance = max_distance  # max center-to-center pixels to allow a match
 
         # Active tracks: entity_id -> {"label": str, "box": np.ndarray, "lost": int}
         self._tracks: dict[str, dict] = {}
@@ -85,10 +95,16 @@ class IDTracker:
                 continue
 
             # Compute IoU matrix: detections x tracks
+            # Zero out entries where center-to-center distance exceeds max_distance
+            # to prevent cross-field ID swaps when tracks go lost
             iou_matrix = np.zeros((len(det_indices), len(candidate_tracks)))
             for di, det_i in enumerate(det_indices):
                 for ti, (tid, t) in enumerate(candidate_tracks):
-                    iou_matrix[di, ti] = _iou(detection.boxes[det_i], t["box"])
+                    dist = _center_distance(detection.boxes[det_i], t["box"])
+                    if dist > self.max_distance:
+                        iou_matrix[di, ti] = 0.0  # too far — prevent match
+                    else:
+                        iou_matrix[di, ti] = _iou(detection.boxes[det_i], t["box"])
 
             # Greedy matching: highest IoU first
             matched_dets = set()
