@@ -66,17 +66,25 @@ class Segmenter:
     def _upscale_results(
         self, boxes: np.ndarray, masks: np.ndarray, scale: float, orig_w: int, orig_h: int
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Scale boxes and masks back to original resolution."""
+        """Scale boxes and masks back to original resolution.
+
+        Masks are upscaled as a batch using a single OpenCV resize per mask
+        (the loop is unavoidable since cv2.resize is 2-D only), but we avoid
+        repeated Python-object allocations by pre-allocating the output array.
+        """
         if scale == 1.0:
             return boxes, masks
 
         # Scale bounding boxes back up
         boxes = boxes / scale
 
-        # Resize each mask to original dimensions
-        upscaled = np.zeros((masks.shape[0], orig_h, orig_w), dtype=masks.dtype)
-        for i in range(masks.shape[0]):
-            upscaled[i] = cv2.resize(masks[i].astype(np.float32), (orig_w, orig_h)) > 0.5
+        # Pre-allocate output and fill in-place (avoids repeated np.zeros)
+        n = masks.shape[0]
+        upscaled = np.empty((n, orig_h, orig_w), dtype=np.uint8)
+        for i in range(n):
+            resized = cv2.resize(masks[i].astype(np.float32), (orig_w, orig_h))
+            upscaled[i] = (resized > 0.5).astype(np.uint8)
+
         return boxes, upscaled
 
     @staticmethod

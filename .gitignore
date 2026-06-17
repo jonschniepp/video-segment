@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Media and generated outputs
+*.mp4
+*.entities.json
+*.entities.csv
+*.entities.coco.json
